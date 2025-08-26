@@ -11,9 +11,5 @@ const addressSchema = new mongoose.Schema({
   country:    { type: String, required: true, trim: true, maxlength: 30 },
 });
 
-/*addressSchema.index(
-  { customerId: 1, line1: 1, line2: 1, city: 1, state: 1, postalCode: 1, country: 1 },
-  { unique: true, partialFilterExpression: { line1: { $exists: true } } }
-);*/
 
 export default mongoose.model("Address", addressSchema);
