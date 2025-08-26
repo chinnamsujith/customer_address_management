@@ -1,3 +1,4 @@
+// routes/customers.js
 import { Router } from 'express';
 import mongoose from 'mongoose';
 import Customer from '../models/Customer.js';
@@ -5,59 +6,99 @@ import Address from '../models/Address.js';
 
 const router = Router();
 
-
-/*const sanitizeAddress = (a = {}) => ({
-  label: a.label?.trim() || null,
-  line1: a.line1?.trim(),
-  line2: a.line2?.trim() || null,
-  city: a.city?.trim(),
-  state: a.state?.trim(),
-  postalCode: a.postalCode?.trim(),
-  country: a.country?.trim(),
-});*/
-
-
-
+/* API to fetch all the customers */
 router.get('/', async (req, res) => {
   try {
-    const customers = await Customer.find();
-    res.json(customers);
+    const {
+      search = '',
+      page = '1',
+      limit = '10',
+      sort = 'firstName,lastName',   // default sort
+    } = req.query;
+
+    const pageNum  = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
+
+    // helpers
+    const escapeRx = (s = '') => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const digits   = (s = '') => s.toString().replace(/\D/g, '');
+
+    // build filter
+    let filter = {};
+    if (search.trim()) {
+      const rx = new RegExp(escapeRx(search.trim()), 'i'); // case-insensitive
+      const phoneDigits = digits(search);
+      filter = {
+        $or: [
+          { firstName: rx },
+          { lastName: rx },
+          { email: rx },
+          ...(phoneDigits ? [{ phone: { $regex: phoneDigits, $options: 'i' } }] : []),
+        ],
+      };
+    }
+
+    // sort parser: "firstName,-createdAt" -> { firstName: 1, createdAt: -1 }
+    const sortObj = {};
+    sort.toString()
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean)
+      .forEach(key => {
+        if (key.startsWith('-')) sortObj[key.slice(1)] = -1;
+        else sortObj[key] = 1;
+      });
+
+    const skip = (pageNum - 1) * limitNum;
+
+    const [items, total] = await Promise.all([
+      Customer.find(filter)
+        .sort(sortObj)
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      Customer.countDocuments(filter),
+    ]);
+
+    res.json({
+      data: items,
+      page: pageNum,
+      limit: limitNum,
+      total,
+      totalPages: Math.max(Math.ceil(total / limitNum), 1),
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Internal server error' });
   }
 });
 
+/* API to fetch a particular customer */
 router.get('/:id', async (req, res) => {
-  try{
-    const {id} = req.params;
-    console.log(id);
-  if(!mongoose.isValidObjectId(id)){
-    return res.status(400).json({message:"Invalid customer id"});
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid customer id' });
+    }
+
+    const [customerDetails, addresses] = await Promise.all([
+      Customer.findById(id).lean(),
+      Address.find({ customerId: id }).lean(),
+    ]);
+
+    if (!customerDetails) {
+      return res.status(404).json({ message: 'Customer not found' });
+    }
+
+    // NOTE: 200 (OK) is more appropriate than 201 (Created)
+    return res.status(200).json({ ...customerDetails, addresses });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Internal server error' });
   }
+});
 
-  const [customerDetails, addresses] = await Promise.all([Customer.findById(id).lean(),
-   Address.find({customerId: id}).lean()]);
-
-   console.log(customerDetails);
-   console.log(addresses);
-   console.log('Addr count:', await Address.countDocuments({ customerId: id }));
-   if(!customerDetails)
-   {
-    return res.status(404).json({message: "Customer not found"})
-   }
-
-
-   return res.status(201).json({...customerDetails,addresses});
-
-
-  }
-  catch(err){
-    return res.status(500).json({ message: "Internal server error" });
-  }
-  
-})
-
+/* API to add a new customer */
 router.post('/add-customer', async (req, res) => {
   const { firstName, lastName, email, phone, addresses = [] } = req.body;
 
@@ -76,21 +117,21 @@ router.post('/add-customer', async (req, res) => {
   }
 
   try {
-    const lookup = await Customer.findOne({email});
+    const lookup = await Customer.findOne({ email });
     if (lookup) {
-      return res.status(409).json({ error: "Customer email already exists" });
+      return res.status(409).json({ error: 'Customer email already exists' });
     }
 
     const customer = await Customer.create({ firstName, lastName, email, phone });
 
     try {
-      const prepared = addresses.map(addr => ({...addr, customerId: customer._id}));
-      console.log('Prepared addresses:', prepared);
+      const prepared = addresses.map(addr => ({ ...addr, customerId: customer._id }));
       const createdAddresses = await Address.insertMany(prepared);
       return res.status(201).json({ ...customer.toObject(), addresses: createdAddresses });
     } catch (addrErr) {
       console.error('Address insert error:', addrErr?.message, addrErr?.errors);
-      return res.status(400).json({ message: 'Invalid address data', details });
+      // FIX: 'details' was undefined previously
+      return res.status(400).json({ message: 'Invalid address data', details: addrErr?.errors });
     }
   } catch (err) {
     console.error(err);
@@ -98,7 +139,7 @@ router.post('/add-customer', async (req, res) => {
   }
 });
 
-// routes/customers.js
+/* API to update customer details */
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -138,8 +179,7 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-
-// routes/customers.js
+/* API to delete a customer (and their addresses) */
 router.delete('/:id', async (req, res) => {
   const { id } = req.params;
 
@@ -185,75 +225,5 @@ router.delete('/:id', async (req, res) => {
     }
   }
 });
-
-router.delete('/:customerId/addresses/:addressId', async (req, res) => {
-  const { customerId, addressId } = req.params;
-
-  if (!mongoose.isValidObjectId(customerId) || !mongoose.isValidObjectId(addressId)) {
-    return res.status(400).json({ message: 'Invalid id(s)' });
-  }
-
-  try {
-    const customer = await Customer.findById(customerId).lean();
-    if (!customer) return res.status(404).json({ message: 'Customer not found' });
-
-    // Optional guard: prevent deleting the last address
-    // const addrCount = await Address.countDocuments({ customerId });
-    // if (addrCount <= 1) return res.status(400).json({ message: 'Customer must have at least one address' });
-
-    // Ensure address belongs to this customer
-    const addr = await Address.findOne({ _id: addressId, customerId }).lean();
-    if (!addr) return res.status(404).json({ message: 'Address not found for this customer' });
-
-    await Address.deleteOne({ _id: addressId, customerId });
-
-    const addresses = await Address.find({ customerId }).lean();
-    return res.status(200).json({ ...customer, addresses });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-});
-
-router.patch('/:customerId/addresses/:addressId', async (req, res) => {
-  const { customerId, addressId } = req.params;
-
-  if (!mongoose.isValidObjectId(customerId) || !mongoose.isValidObjectId(addressId)) {
-    return res.status(400).json({ message: 'Invalid id(s)' });
-  }
-
-  // Only allow these fields to be edited
-  const ALLOWED = ['label', 'line1', 'line2', 'city', 'state', 'postalCode', 'country'];
-  const update = {};
-  for (const k of ALLOWED) {
-    if (k in req.body) {
-      const v = req.body[k];
-      update[k] = typeof v === 'string' ? v.trim() : v;
-    }
-  }
-
-  try {
-    const customer = await Customer.findById(customerId).lean();
-    if (!customer) return res.status(404).json({ message: 'Customer not found' });
-
-    // Ensure the address belongs to this customer
-    const updatedAddress = await Address.findOneAndUpdate(
-      { _id: addressId, customerId },
-      { $set: update },
-      { new: true, runValidators: true }
-    ).lean();
-
-    if (!updatedAddress) {
-      return res.status(404).json({ message: 'Address not found for this customer' });
-    }
-
-    const addresses = await Address.find({ customerId }).lean();
-    return res.status(200).json({ ...customer, addresses });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ message: 'Internal server error' });
-  }
-});
-
 
 export default router;

@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 
 const addressSchema = new mongoose.Schema({
   customerId: { type: mongoose.Schema.Types.ObjectId, ref: "Customer", required: true, index: true },
-  label: { type: String, trim: true },
+  label:      { type: String, trim: true },
   line1:      { type: String, required: true, trim: true, maxlength: 50 },
   line2:      { type: String, trim: true, maxlength: 50 },
   city:       { type: String, required: true, trim: true, maxlength: 20 },
@@ -11,5 +11,10 @@ const addressSchema = new mongoose.Schema({
   country:    { type: String, required: true, trim: true, maxlength: 30 },
 });
 
+// Helpful indexes for filtering
+addressSchema.index({ city: 1 });
+addressSchema.index({ state: 1 });
+addressSchema.index({ postalCode: 1 });
+addressSchema.index({ city: 1, state: 1, postalCode: 1 });
 
 export default mongoose.model("Address", addressSchema);

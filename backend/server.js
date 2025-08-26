@@ -1,14 +1,17 @@
 import 'dotenv/config';
 import express from 'express';
 import mongoose from 'mongoose';
-import customerRoute from "./routes/customers.js"
+import custRoute from "./routes/customersRoute.js";
+import addRoute from "./routes/addressRoute.js";
+
 import cors from 'cors';
 
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use("/api/customers", customerRoute);
+app.use("/api/customers", custRoute);
+app.use("/api/address",addRoute);
 console.log("Inside Server.js");
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('-- Connection to MongoDB Successful --'))
