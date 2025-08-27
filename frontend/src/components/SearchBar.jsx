@@ -15,7 +15,7 @@ export default function SearchBar({
         placeholder={placeholder}
       />
       {value && (
-        <button onClick={onClear}>
+        <button type = "button" onClick={onClear}>
           &times;
         </button>
       )}

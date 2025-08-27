@@ -11,7 +11,7 @@ const addressSchema = new mongoose.Schema({
   country:    { type: String, required: true, trim: true, maxlength: 30 },
 });
 
-// Helpful indexes for filtering
+//Indexes for filtering
 addressSchema.index({ city: 1 });
 addressSchema.index({ state: 1 });
 addressSchema.index({ postalCode: 1 });

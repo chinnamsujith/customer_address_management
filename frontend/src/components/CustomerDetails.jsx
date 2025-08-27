@@ -240,7 +240,7 @@ export default function CustomerDetails() {
                 <div className="section-header">
                   <h3>Addresses</h3>
                   {!addingAddress && !editingAddressId && (
-                    <button onClick={() => setAddingAddress(true)}>+ Add New Address</button>
+                    <div className="btn-group"><button onClick={() => setAddingAddress(true)}>+ Add New Address</button></div>
                   )}
                 </div>
 

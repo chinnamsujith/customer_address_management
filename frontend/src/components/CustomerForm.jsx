@@ -118,6 +118,7 @@ export const CustomerForm = () => {
         <h2>Customer Details</h2>
 
         {formError && <div className="form-error">{formError}</div>}
+         <button className="back-btn" onClick={() => navigate(-1)}>← Back</button>
 
         <form onSubmit={onSubmitHandler}>
           <div className="grid-2">
