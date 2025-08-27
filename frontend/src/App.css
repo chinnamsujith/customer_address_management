@@ -514,6 +514,7 @@
 }
 
 .search-bar {
+  position: relative;
   width: 100%;
   max-width: 320px;
   margin: 0 auto; /* centers horizontally */
@@ -529,6 +530,19 @@
   border-radius: 8px;
   outline: none;
   transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.search-bar button {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0;
 }
 
 .search-bar input:focus {

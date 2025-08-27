@@ -20,7 +20,6 @@ export default function Dashboard() {
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState("");
   const [q, setQ]               = useState("");
-
   const [advLoading, setAdvLoading]   = useState(false);
   const [advError, setAdvError]       = useState("");
   const [advResults, setAdvResults]   = useState(null);
@@ -28,12 +27,10 @@ export default function Dashboard() {
 
   // Address counts for normal list view { customerId: number }
   const [addrCounts, setAddrCounts] = useState({});
-
-  // Sort state
-  const [sortBy, setSortBy] = useState(SORTS.NAME_ASC);
+  const [sortBy, setSortBy] = useState(SORTS.NAME_ASC);  // Sort state
 
   const navigate = useNavigate();
-
+  //Fetching Customers
   useEffect(() => {
     (async () => {
       try {
@@ -67,7 +64,8 @@ export default function Dashboard() {
 
   const norm   = (s = "") => (s ?? "").toString().toLowerCase().trim();
   const digits = (s = "") => (s ?? "").toString().replace(/\D/g, "");
-
+  
+  //returns Search results
   const filtered = useMemo(() => {
     if (!q.trim()) return customers;
     const nq = norm(q);
