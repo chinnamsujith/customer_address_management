@@ -1,25 +1,36 @@
-// src/pages/Dashboard.jsx
 import { useEffect, useMemo, useState } from "react";
 import AdvancedFilters from "../components/AdvancedFilters";
 import axios from "axios";
 import { useNavigate, Link } from "react-router-dom";
 import SearchBar from "../components/SearchBar";
 
-const BASE_URL      = "http://localhost:5000";
+const BASE_URL = "http://localhost:5000";
 const CUSTOMERS_API = `${BASE_URL}/api/customers`;
-const ADDRESS_API   = `${BASE_URL}/api/address`;
+const ADDRESS_API = `${BASE_URL}/api/address`;
+
+const SORTS = {
+  NAME_ASC: "name_asc",
+  NAME_DESC: "name_desc",
+  CREATED_DESC: "created_desc", // newest first
+  CREATED_ASC: "created_asc",   // oldest first
+};
 
 export default function Dashboard() {
-  const [customers, setCustomers]   = useState([]);
-  const [loading, setLoading]       = useState(true);
-  const [error, setError]           = useState("");
-  const [q, setQ]                   = useState("");
+  const [customers, setCustomers] = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [error, setError]       = useState("");
+  const [q, setQ]               = useState("");
 
-  // advanced search state
-  const [advLoading, setAdvLoading] = useState(false);
-  const [advError, setAdvError]     = useState("");
-  const [advResults, setAdvResults] = useState(null); // null = inactive; object when active
-  const [advQuery, setAdvQuery]     = useState({ city: "", state: "", pincode: "" }); // keep last query for paging
+  const [advLoading, setAdvLoading]   = useState(false);
+  const [advError, setAdvError]       = useState("");
+  const [advResults, setAdvResults]   = useState(null);
+  const [advQuery, setAdvQuery]       = useState({ city: "", state: "", pincode: "" });
+
+  // Address counts for normal list view { customerId: number }
+  const [addrCounts, setAddrCounts] = useState({});
+
+  // Sort state
+  const [sortBy, setSortBy] = useState(SORTS.NAME_ASC);
 
   const navigate = useNavigate();
 
@@ -29,7 +40,7 @@ export default function Dashboard() {
         setLoading(true);
         setError("");
         const { data } = await axios.get(CUSTOMERS_API);
-        setCustomers(Array.isArray(data) ? data : (data?.data || []));
+        setCustomers(Array.isArray(data) ? data : data?.data || []);
       } catch (err) {
         if (!axios.isCancel(err)) setError("Failed to load customers.");
       } finally {
@@ -37,6 +48,22 @@ export default function Dashboard() {
       }
     })();
   }, []);
+
+  // Fetch address counts for all loaded customers (regular list)
+  useEffect(() => {
+    if (!customers.length) return;
+
+    (async () => {
+      try {
+        const ids = customers.map(c => c._id).join(",");
+        const { data } = await axios.get(`${ADDRESS_API}/counts`, { params: { customerIds: ids } });
+        setAddrCounts(data?.counts || {});
+      } catch (e) {
+        // Non-blocking
+        console.warn("Failed to load address counts", e);
+      }
+    })();
+  }, [customers]);
 
   const norm   = (s = "") => (s ?? "").toString().toLowerCase().trim();
   const digits = (s = "") => (s ?? "").toString().replace(/\D/g, "");
@@ -47,32 +74,81 @@ export default function Dashboard() {
     const nqDigits = digits(q);
     return customers.filter((c) => {
       const fullName = `${c.firstName ?? ""} ${c.lastName ?? ""}`;
-      const nameHit  = norm(fullName).includes(nq);
-      const emailHit = norm(c.email ?? "").includes(nq);
-      const phoneHit = digits(c.phone ?? "").includes(nqDigits);
-      return nameHit || emailHit || (nqDigits ? phoneHit : false);
+      return (
+        norm(fullName).includes(nq) ||
+        norm(c.email ?? "").includes(nq) ||
+        (nqDigits && digits(c.phone ?? "").includes(nqDigits))
+      );
     });
   }, [customers, q]);
 
-  const list = advResults ? advResults.data.map((x) => x.customer) : filtered;
+  // Helper: build a unified list of items so we can sort safely
+  // In adv mode we carry matched addresses + count; in normal we just have customer.
+  const baseItems = useMemo(() => {
+    if (advResults) {
+      return (advResults.data || []).map((x) => ({
+        customer: x.customer,
+        matched: x.matchedAddresses || [],
+        totalAddressCount: x.totalAddressCount ?? 0,
+      }));
+    }
+    return filtered.map((c) => ({ customer: c }));
+  }, [advResults, filtered]);
 
-  // advanced search
+  // Helpers for sorting
+  const fullName = (c) => `${c.firstName ?? ""} ${c.lastName ?? ""}`.trim().toLowerCase();
+
+  // If createdAt missing, derive from ObjectId (first 8 hex chars = seconds since epoch)
+  const createdMs = (c) => {
+    if (c?.createdAt) {
+      const t = Date.parse(c.createdAt);
+      if (!Number.isNaN(t)) return t;
+    }
+    try {
+      if (typeof c?._id === "string" && c._id.length >= 8) {
+        const sec = parseInt(c._id.slice(0, 8), 16);
+        if (!Number.isNaN(sec)) return sec * 1000;
+      }
+    } catch (_) {}
+    return 0;
+  };
+
+  const sortedItems = useMemo(() => {
+    const arr = [...baseItems];
+    arr.sort((a, b) => {
+      const ca = a.customer;
+      const cb = b.customer;
+      switch (sortBy) {
+        case SORTS.NAME_ASC:
+          return fullName(ca).localeCompare(fullName(cb));
+        case SORTS.NAME_DESC:
+          return fullName(cb).localeCompare(fullName(ca));
+        case SORTS.CREATED_DESC: // newest first
+          return createdMs(cb) - createdMs(ca);
+        case SORTS.CREATED_ASC:  // oldest first
+          return createdMs(ca) - createdMs(cb);
+        default:
+          return 0;
+      }
+    });
+    return arr;
+  }, [baseItems, sortBy]);
+
   const runAdvancedSearch = async ({ city, state, pincode, page = 1 }) => {
     try {
       setAdvLoading(true);
       setAdvError("");
       setAdvQuery({ city, state, pincode });
-      const { data } = await axios.get(
-        `${ADDRESS_API}/search-address`,
-        { params: { city, state, pincode, page, limit: 20 } }
-      );
+      const { data } = await axios.get(`${ADDRESS_API}/search-address`, {
+        params: { city, state, pincode, page, limit: 20 },
+      });
       setAdvResults(data);
     } catch (e) {
-      const msg =
+      setAdvError(
         e?.response?.status === 400
           ? e?.response?.data?.message || "Provide at least one of city/state/pincode."
-          : "Failed to run address search.";
-      setAdvError(msg);
+          : "Failed to run address search."
+      );
     } finally {
       setAdvLoading(false);
     }
@@ -93,154 +169,115 @@ export default function Dashboard() {
   const clear = () => setQ("");
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="max-w-6xl mx-auto p-6">
-        {/* header */}
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4">
-          <h1 className="text-2xl font-semibold text-gray-800">Customers</h1>
-
-          {/* search + add */}
-          <div className="flex items-center gap-2 w-full sm:w-auto">
+    <div className="dashboard-container">
+      <div className="dashboard-card">
+        {/* Header */}
+        <div className="dashboard-header">
+          <h1>Customers</h1>
+          <div className="search-add">
             <SearchBar value={q} onChange={setQ} onClear={clear} />
-            <Link
-              to="/add-customer"
-              className="inline-flex items-center rounded-lg bg-blue-600 px-3 py-2 text-white text-sm hover:bg-blue-700 shadow"
-            >
-              + Add Customer
-            </Link>
+
+            {/* Sort control */}
+            <div className="sort-wrap">
+              <label className="sort-label" htmlFor="sortBy">Sort by:</label>
+              <select
+                id="sortBy"
+                className="sort-select"
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value)}
+              >
+                <option value={SORTS.NAME_ASC}>Name (A → Z)</option>
+                <option value={SORTS.NAME_DESC}>Name (Z → A)</option>
+                <option value={SORTS.CREATED_DESC}>Created (Newest)</option>
+                <option value={SORTS.CREATED_ASC}>Created (Oldest)</option>
+              </select>
+            </div>
           </div>
         </div>
 
         {/* Advanced Filters */}
-        <div className="mb-3">
+        <div className="advanced-filters-section">
           <AdvancedFilters onSearch={runAdvancedSearch} onClear={clearAdvanced} />
-          {advLoading && <div className="mt-2 text-sm text-gray-600">Searching addresses…</div>}
-          {advError && (
-            <div className="mt-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
-              {advError}
-            </div>
-          )}
+          {advLoading && <div className="info-text">Searching addresses…</div>}
+          {advError && <div className="error-text">{advError}</div>}
         </div>
 
-        {/* meta row */}
+        {/* Meta info */}
         {!loading && !error && (
-          <div className="mb-3 text-xs text-gray-600 flex items-center justify-between">
+          <div className="meta-row">
             <div>
               {advResults ? (
                 <>
-                  Showing <span className="font-semibold">{list.length}</span> of{" "}
-                  <span className="font-semibold">{advResults.total}</span> customers
-                  <span className="ml-2 rounded bg-indigo-50 px-2 py-0.5 text-indigo-700">
-                    address filter active
-                  </span>
+                  Showing <b>{sortedItems.length}</b> of <b>{advResults.total}</b> customers
+                  <span className="badge">address filter active</span>
                 </>
               ) : (
                 <>
-                  Showing <span className="font-semibold">{filtered.length}</span> of{" "}
-                  <span className="font-semibold">{customers.length}</span> customers
-                  {q ? <> for “<span className="italic">{q}</span>”</> : null}
+                  Showing <b>{sortedItems.length}</b> of <b>{customers.length}</b> customers
+                  {q && <> for “<i>{q}</i>”</>}
                 </>
               )}
             </div>
 
-            {/* pagination (only in advanced mode) */}
             {advResults && advResults.totalPages > 1 && (
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => goPage(-1)}
-                  disabled={advResults.page <= 1 || advLoading}
-                  className={`rounded-md border px-2 py-1 text-sm ${
-                    advResults.page <= 1 || advLoading
-                      ? "text-gray-400 border-gray-200 cursor-not-allowed"
-                      : "text-gray-700 border-gray-300 hover:bg-gray-50"
-                  }`}
-                >
-                  Prev
-                </button>
-                <span className="text-gray-700 text-sm">
-                  Page {advResults.page} / {advResults.totalPages}
-                </span>
-                <button
-                  onClick={() => goPage(1)}
-                  disabled={advResults.page >= advResults.totalPages || advLoading}
-                  className={`rounded-md border px-2 py-1 text-sm ${
-                    advResults.page >= advResults.totalPages || advLoading
-                      ? "text-gray-400 border-gray-200 cursor-not-allowed"
-                      : "text-gray-700 border-gray-300 hover:bg-gray-50"
-                  }`}
-                >
-                  Next
-                </button>
+              <div className="pagination">
+                <button onClick={() => goPage(-1)} disabled={advResults.page <= 1 || advLoading}>Prev</button>
+                <span>Page {advResults.page} / {advResults.totalPages}</span>
+                <button onClick={() => goPage(1)} disabled={advResults.page >= advResults.totalPages || advLoading}>Next</button>
               </div>
             )}
           </div>
         )}
 
-        {/* loading skeletons */}
+        {/* Loading skeleton */}
         {loading && (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid-cards">
             {[...Array(6)].map((_, i) => (
-              <div key={i} className="animate-pulse rounded-xl bg-white p-4 shadow">
-                <div className="h-4 w-1/3 bg-gray-200 rounded mb-2"></div>
-                <div className="h-4 w-1/2 bg-gray-200 rounded mb-2"></div>
-                <div className="h-4 w-1/4 bg-gray-200 rounded"></div>
-              </div>
+              <div key={i} className="skeleton-card"></div>
             ))}
           </div>
         )}
 
-        {/* error */}
-        {error && (
-          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-            {error}
-          </div>
-        )}
+        {/* Errors */}
+        {error && <div className="error-text">{error}</div>}
 
-        {/* empty states */}
-        {!loading && !error && customers.length === 0 && !advResults && (
-          <div className="text-gray-600">No customers found.</div>
-        )}
-        {!loading && !error && !advResults && customers.length > 0 && filtered.length === 0 && (
-          <div className="text-gray-600">No matches for “{q}”.</div>
-        )}
-        {!loading && !error && advResults && advResults.total === 0 && (
-          <div className="text-gray-600">No customers matched the address filters.</div>
-        )}
+        {/* Empty states */}
+        {!loading && !error && customers.length === 0 && !advResults && <div className="info-text">No customers found.</div>}
+        {!loading && !error && !advResults && customers.length > 0 && sortedItems.length === 0 && <div className="info-text">No matches for “{q}”.</div>}
+        {!loading && !error && advResults && advResults.total === 0 && <div className="info-text">No customers matched the address filters.</div>}
 
-        {/* results: GRID */}
-        <div
-          className="
-            grid gap-4
-            sm:grid-cols-2
-            lg:grid-cols-3
-          "
-        >
-          {list.map((c, idx) => {
-            const matched = advResults ? (advResults.data[idx]?.matchedAddresses || []) : [];
-            const fullName = `${c.firstName ?? ""} ${c.lastName ?? ""}`.trim() || "Unnamed";
+        {/* Customers grid */}
+        <div className="grid-cards">
+          {sortedItems.map((item) => {
+            const c = item.customer;
+
+            // Count logic: use adv count if present, else fall back to addrCounts
+            const totalAddressCount =
+              typeof item.totalAddressCount === "number"
+                ? item.totalAddressCount
+                : (addrCounts[c._id] ?? 0);
+
+            const onlyOne = totalAddressCount === 1;
+            const fullNameDisp = `${c.firstName ?? ""} ${c.lastName ?? ""}`.trim() || "Unnamed";
+            const matched = advResults ? (item.matched || []) : [];
+
             return (
-              <div
-                key={c._id}
-                className="bg-white rounded-xl shadow p-4 transition hover:shadow-md border border-transparent hover:border-gray-200"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-lg font-semibold text-gray-900 truncate">{fullName}</div>
-                    <div className="text-gray-700 truncate">{c.email || "-"}</div>
-                    <div className="text-gray-700 truncate">{c.phone || "-"}</div>
+              <div key={c._id} className="customer-card">
+                <div className="customer-info">
+                  <div className="customer-name">
+                    {fullNameDisp}
+                    {onlyOne && <span className="badge one">Only 1 address</span>}
                   </div>
-                  <button
-                    onClick={() => navigate(`/customers/${c._id}`)}
-                    className="rounded-md bg-gray-800 px-3 py-2 text-white text-sm hover:bg-black"
-                  >
-                    View
-                  </button>
+                  <div className="customer-email">{c.email || "-"}</div>
+                  <div className="customer-phone">{c.phone || "-"}</div>
                 </div>
 
+                <button className="view-btn" onClick={() => navigate(`/customers/${c._id}`)}>View</button>
+
                 {advResults && matched.length > 0 && (
-                  <div className="mt-3 rounded-lg bg-gray-50 p-3">
-                    <div className="text-xs font-semibold text-gray-700 mb-1">Matched addresses</div>
-                    <ul className="text-sm text-gray-700 list-disc pl-5 space-y-1">
+                  <div className="matched-addresses">
+                    <div className="matched-title">Matched addresses</div>
+                    <ul>
                       {matched.map((a) => (
                         <li key={a._id}>
                           {[a.line1, a.line2].filter(Boolean).join(", ")}
@@ -255,257 +292,9 @@ export default function Dashboard() {
             );
           })}
         </div>
+
+        <Link to="/add-customer" className="add-btn">+ Add Customer</Link>
       </div>
     </div>
   );
 }
-/*
-// src/pages/Dashboard.jsx
-import { useEffect, useMemo, useState } from "react";
-import AdvancedFilters from "../components/AdvancedFilters";
-import axios from "axios";
-import { useNavigate, Link } from "react-router-dom";
-import SearchBar from "../components/SearchBar";
-
-export default function Dashboard() {
-  const [customers, setCustomers]   = useState([]);
-  const [loading, setLoading]       = useState(true);
-  const [error, setError]           = useState("");
-  const [q, setQ]                   = useState("");
-
-  // advanced search state
-  const [advLoading, setAdvLoading] = useState(false);
-  const [advError, setAdvError]     = useState("");
-  const [advResults, setAdvResults] = useState(null); // null = inactive; object when active
-  const [advQuery, setAdvQuery]     = useState({ city: "", state: "", pincode: "" }); // keep last query for paging
-
-  const navigate = useNavigate();
-
-  useEffect(() => {
-    (async () => {
-      try {
-        setLoading(true);
-        setError("");
-        const { data } = await axios.get("http://localhost:5000/api/customers");
-        setCustomers(Array.isArray(data) ? data : (data?.data || []));
-      } catch (err) {
-        if (!axios.isCancel(err)) setError("Failed to load customers.");
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, []);
-
-  const norm   = (s = "") => (s ?? "").toString().toLowerCase().trim();
-  const digits = (s = "") => (s ?? "").toString().replace(/\D/g, "");
-
-  const filtered = useMemo(() => {
-    if (!q.trim()) return customers;
-    const nq = norm(q);
-    const nqDigits = digits(q);
-    return customers.filter((c) => {
-      const fullName = `${c.firstName ?? ""} ${c.lastName ?? ""}`;
-      const nameHit  = norm(fullName).includes(nq);
-      const emailHit = norm(c.email ?? "").includes(nq);
-      const phoneHit = digits(c.phone ?? "").includes(nqDigits);
-      return nameHit || emailHit || (nqDigits ? phoneHit : false);
-    });
-  }, [customers, q]);
-
-  const list = advResults ? advResults.data.map((x) => x.customer) : filtered;
-
-  // advanced search
-  const runAdvancedSearch = async ({ city, state, pincode, page = 1 }) => {
-    try {
-      setAdvLoading(true);
-      setAdvError("");
-      setAdvQuery({ city, state, pincode });
-      const { data } = await axios.get(
-        "http://localhost:5000/api/customers/search-address",
-        { params: { city, state, pincode, page, limit: 20 } } // removed sort
-      );
-      setAdvResults(data);
-    } catch (e) {
-      const msg =
-        e?.response?.status === 400
-          ? e?.response?.data?.message || "Provide at least one of city/state/pincode."
-          : "Failed to run address search.";
-      setAdvError(msg);
-    } finally {
-      setAdvLoading(false);
-    }
-  };
-
-  const goPage = (delta) => {
-    if (!advResults) return;
-    const next = Math.min(Math.max(1, advResults.page + delta), advResults.totalPages);
-    if (next === advResults.page) return;
-    runAdvancedSearch({ ...advQuery, page: next });
-  };
-
-  const clearAdvanced = () => {
-    setAdvResults(null);
-    setAdvError("");
-  };
-
-  const clear = () => setQ("");
-
-  return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="max-w-4xl mx-auto p-6">
-//       header 
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4">
-          <h1 className="text-2xl font-semibold text-gray-800">Customers</h1>
-
-//         search + add 
-          <div className="flex items-center gap-2 w-full sm:w-auto">
-            <SearchBar value={q} onChange={setQ} onClear={clear} />
-            <Link
-              to="/add-customer"
-              className="inline-flex items-center rounded-lg bg-blue-600 px-3 py-2 text-white text-sm hover:bg-blue-700 shadow"
-            >
-              + Add Customer
-            </Link>
-          </div>
-        </div>
-
-//       Advanced Filters
-        <div className="mb-3">
-          <AdvancedFilters onSearch={runAdvancedSearch} onClear={clearAdvanced} />
-          {advLoading && <div className="mt-2 text-sm text-gray-600">Searching addresses…</div>}
-          {advError && (
-            <div className="mt-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
-              {advError}
-            </div>
-          )}
-        </div>
-
-//       meta row
-        {!loading && !error && (
-          <div className="mb-3 text-xs text-gray-600 flex items-center justify-between">
-            <div>
-              {advResults ? (
-                <>
-                  Showing <span className="font-semibold">{list.length}</span> of{" "}
-                  <span className="font-semibold">{advResults.total}</span> customers
-                  <span className="ml-2 rounded bg-indigo-50 px-2 py-0.5 text-indigo-700">
-                    address filter active
-                  </span>
-                </>
-              ) : (
-                <>
-                  Showing <span className="font-semibold">{filtered.length}</span> of{" "}
-                  <span className="font-semibold">{customers.length}</span> customers
-                  {q ? <> for “<span className="italic">{q}</span>”</> : null}
-                </>
-              )}
-            </div>
-
-//           pagination (only in advanced mode) 
-            {advResults && advResults.totalPages > 1 && (
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => goPage(-1)}
-                  disabled={advResults.page <= 1 || advLoading}
-                  className={`rounded-md border px-2 py-1 text-sm ${
-                    advResults.page <= 1 || advLoading
-                      ? "text-gray-400 border-gray-200 cursor-not-allowed"
-                      : "text-gray-700 border-gray-300 hover:bg-gray-50"
-                  }`}
-                >
-                  Prev
-                </button>
-                <span className="text-gray-700 text-sm">
-                  Page {advResults.page} / {advResults.totalPages}
-                </span>
-                <button
-                  onClick={() => goPage(1)}
-                  disabled={advResults.page >= advResults.totalPages || advLoading}
-                  className={`rounded-md border px-2 py-1 text-sm ${
-                    advResults.page >= advResults.totalPages || advLoading
-                      ? "text-gray-400 border-gray-200 cursor-not-allowed"
-                      : "text-gray-700 border-gray-300 hover:bg-gray-50"
-                  }`}
-                >
-                  Next
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-
-//      loading skeletons 
-        {loading && (
-          <div className="space-y-3">
-            {[...Array(3)].map((_, i) => (
-              <div key={i} className="animate-pulse rounded-xl bg-white p-4 shadow">
-                <div className="h-4 w-1/3 bg-gray-200 rounded mb-2"></div>
-                <div className="h-4 w-1/2 bg-gray-200 rounded mb-2"></div>
-                <div className="h-4 w-1/4 bg-gray-200 rounded"></div>
-              </div>
-            ))}
-          </div>
-        )}
-
-//        error 
-        {error && (
-          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-            {error}
-          </div>
-        )}
-
-//        empty states 
-        {!loading && !error && customers.length === 0 && !advResults && (
-          <div className="text-gray-600">No customers found.</div>
-        )}
-        {!loading && !error && !advResults && customers.length > 0 && filtered.length === 0 && (
-          <div className="text-gray-600">No matches for “{q}”.</div>
-        )}
-        {!loading && !error && advResults && advResults.total === 0 && (
-          <div className="text-gray-600">No customers matched the address filters.</div>
-        )}
-
-//        results 
-        <div className="space-y-4">
-          {list.map((c, idx) => {
-            const matched = advResults ? (advResults.data[idx]?.matchedAddresses || []) : [];
-            return (
-              <div key={c._id} className="bg-white rounded-xl shadow p-4">
-                <div className="flex items-start justify-between">
-                  <div className="min-w-0">
-                    <div className="text-lg font-semibold text-gray-900 truncate">
-                      {(c.firstName ?? "") + " " + (c.lastName ?? "")}
-                    </div>
-                    <div className="text-gray-700 truncate">{c.email}</div>
-                    <div className="text-gray-700 truncate">{c.phone}</div>
-                  </div>
-                  <button
-                    onClick={() => navigate(`/customers/${c._id}`)}
-                    className="rounded-md bg-gray-800 px-3 py-2 text-white text-sm hover:bg-black"
-                  >
-                    View
-                  </button>
-                </div>
-
-                {advResults && matched.length > 0 && (
-                  <div className="mt-3 rounded-lg bg-gray-50 p-3">
-                    <div className="text-xs font-semibold text-gray-700 mb-1">Matched addresses</div>
-                    <ul className="text-sm text-gray-700 list-disc pl-5 space-y-1">
-                      {matched.map((a) => (
-                        <li key={a._id}>
-                          {[a.line1, a.line2].filter(Boolean).join(", ")}{a.line1 || a.line2 ? ", " : ""}
-                          {a.city}, {a.state} {a.postalCode}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-}
-*/

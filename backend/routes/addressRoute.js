@@ -6,6 +6,34 @@ import Address from '../models/Address.js';
 
 const router = Router();
 
+router.get('/counts', async (req, res) => {
+  try {
+    const raw = (req.query.customerIds || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+
+    const ids = raw
+      .filter(mongoose.isValidObjectId)
+      .map(id => new mongoose.Types.ObjectId(id));
+
+    const match = ids.length ? { customerId: { $in: ids } } : {};
+
+    const counts = await Address.aggregate([
+      { $match: match },
+      { $group: { _id: "$customerId", count: { $sum: 1 } } }
+    ]);
+
+    const out = {};
+    for (const c of counts) out[String(c._id)] = c.count;
+
+    return res.status(200).json({ counts: out });
+  } catch (err) {
+    console.error("address counts error:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+});
+
 /**
  * Address search (kept as /api/customers/search-address for compatibility)
  * You can later move this under /api/addresses/search if you prefer.
