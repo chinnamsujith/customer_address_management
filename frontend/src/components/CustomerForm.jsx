@@ -63,6 +63,7 @@ export const CustomerForm = () => {
       if (!a.state?.trim()) e.state = 'State is required';
       if (!a.postalCode?.trim()) e.postalCode = 'Postal code is required';
       if (!a.country?.trim()) e.country = 'Country is required';
+      else if (!/^\d+$/.test(a.postalCode.trim())) e.postalCode = 'Postal code must be numeric';
       return e;
     });
     setAddrErrors(nextErrors);
@@ -205,7 +206,7 @@ export const CustomerForm = () => {
                   <div>
                     <input type="text" placeholder="Postal Code" value={addr.postalCode}
                       onChange={(e) => updateAddressField(index, 'postalCode', e.target.value)}
-                      className="input-field"
+                      className="input-field" inputMode="numeric" pattern="\d*"
                     />
                     {addrErrors[index]?.postalCode && <p className="input-error">{addrErrors[index].postalCode}</p>}
                   </div>
