@@ -13,20 +13,20 @@ router.get('/', async (req, res) => {
       search = '',
       page = '1',
       limit = '10',
-      sort = 'firstName,lastName',   // default sort
+      sort = 'firstName,lastName',
     } = req.query;
 
     const pageNum  = Math.max(parseInt(page, 10) || 1, 1);
     const limitNum = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
+    const skip     = (pageNum - 1) * limitNum;
 
-    // helpers
     const escapeRx = (s = '') => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const digits   = (s = '') => s.toString().replace(/\D/g, '');
 
-    // build filter
+    // Build filter
     let filter = {};
     if (search.trim()) {
-      const rx = new RegExp(escapeRx(search.trim()), 'i'); // case-insensitive
+      const rx = new RegExp(escapeRx(search.trim()), 'i');
       const phoneDigits = digits(search);
       filter = {
         $or: [
@@ -38,7 +38,7 @@ router.get('/', async (req, res) => {
       };
     }
 
-    // sort parser: "firstName,-createdAt" -> { firstName: 1, createdAt: -1 }
+    // Parse sort string into object (for non-name sorts)
     const sortObj = {};
     sort.toString()
       .split(',')
@@ -49,11 +49,52 @@ router.get('/', async (req, res) => {
         else sortObj[key] = 1;
       });
 
-    const skip = (pageNum - 1) * limitNum;
+    // Detect name sorts (from your frontend mapping)
+    const isNameAsc  = sort === 'lastName,firstName' || sort === 'firstName,lastName';
+    const isNameDesc = sort === '-lastName,-firstName' || sort === '-firstName,-lastName';
 
+    // If name sort: use aggregation to normalize & sort reliably
+    if (isNameAsc || isNameDesc) {
+      const dir = isNameAsc ? 1 : -1;
+
+      const pipeline = [
+        { $match: filter },
+        {
+          $addFields: {
+            _ln: {
+              $trim: { input: { $toLower: { $ifNull: ["$lastName",  ""] } } }
+            },
+            _fn: {
+              $trim: { input: { $toLower: { $ifNull: ["$firstName", ""] } } }
+            },
+          }
+        },
+        { $sort: { _fn: dir, _ln: dir,  _id: 1 } }, // tie-breaker on _id
+        { $skip: skip },
+        { $limit: limitNum },
+      ];
+
+      const [items, countArr] = await Promise.all([
+        Customer.aggregate(pipeline),
+        Customer.aggregate([{ $match: filter }, { $count: 'n' }]),
+      ]);
+
+      const total = countArr[0]?.n || 0;
+
+      return res.json({
+        data: items,
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.max(Math.ceil(total / limitNum), 1),
+      });
+    }
+
+    // Otherwise: keep your original find() path (works for createdAt/_id sorts)
     const [items, total] = await Promise.all([
       Customer.find(filter)
         .sort(sortObj)
+        .collation({ locale: 'en', strength: 2 }) // case-insensitive when we’re not using the pipeline
         .skip(skip)
         .limit(limitNum)
         .lean(),
@@ -72,6 +113,7 @@ router.get('/', async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+
 
 /* API to fetch a particular customer */
 router.get('/:id', async (req, res) => {

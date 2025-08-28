@@ -4,9 +4,9 @@ import axios from "axios";
 import { useNavigate, Link } from "react-router-dom";
 import SearchBar from "../components/SearchBar";
 
-const BASE_URL = "http://localhost:5000";
+const BASE_URL      = "http://localhost:5000";
 const CUSTOMERS_API = `${BASE_URL}/api/customers`;
-const ADDRESS_API = `${BASE_URL}/api/address`;
+const ADDRESS_API   = `${BASE_URL}/api/address`;
 
 const SORTS = {
   NAME_ASC: "name_asc",
@@ -15,123 +15,105 @@ const SORTS = {
   CREATED_ASC: "created_asc",   // oldest first
 };
 
-export default function Dashboard() {
-  const [customers, setCustomers] = useState([]);
-  const [loading, setLoading]   = useState(true);
-  const [error, setError]       = useState("");
-  const [q, setQ]               = useState("");
-  const [advLoading, setAdvLoading]   = useState(false);
-  const [advError, setAdvError]       = useState("");
-  const [advResults, setAdvResults]   = useState(null);
-  const [advQuery, setAdvQuery]       = useState({ city: "", state: "", pincode: "" });
+// map UI sort to backend "sort" param (comma list, minus = desc)
+const sortParamFor = (sortBy) => {
+  switch (sortBy) {
+    case SORTS.NAME_ASC:
+      return "lastName,firstName";            // A→Z
+    case SORTS.NAME_DESC:
+      return "-lastName,-firstName";          // Z→A
+    case SORTS.CREATED_DESC:
+      return "-_id";                          // newest first
+    case SORTS.CREATED_ASC:
+      return "_id";                           // oldest first
+    default:
+      return "lastName,firstName";
+  }
+};
 
-  // Address counts for normal list view { customerId: number }
+export default function Dashboard() {
+  const [customers, setCustomers]   = useState([]);
+  const [loading, setLoading]       = useState(true);
+  const [error, setError]           = useState("");
+
+  // search & sort
+  const [q, setQ]                   = useState("");
+  const [sortBy, setSortBy]         = useState(SORTS.NAME_ASC);
+
+  // server-side pagination (normal list)
+  const [page, setPage]             = useState(1);
+  const [limit, setLimit]           = useState(10);
+  const [total, setTotal]           = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+
+  // Advanced search state (unchanged)
+  const [advLoading, setAdvLoading] = useState(false);
+  const [advError, setAdvError]     = useState("");
+  const [advResults, setAdvResults] = useState(null);
+  const [advQuery, setAdvQuery]     = useState({ city: "", state: "", pincode: "" });
+
+  // Address counts for visible customers
   const [addrCounts, setAddrCounts] = useState({});
-  const [sortBy, setSortBy] = useState(SORTS.NAME_ASC);  // Sort state
 
   const navigate = useNavigate();
-  //Fetching Customers
+
+  // debounce the search text so we don’t fetch on every keystroke
+  const [debouncedQ, setDebouncedQ] = useState(q);
   useEffect(() => {
+    const t = setTimeout(() => setDebouncedQ(q), 300);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  // Fetch customers (NORMAL LIST) with server-side pagination/sort/search
+  useEffect(() => {
+    // If advanced mode is active, skip normal list fetch
+    if (advResults) return;
+
     (async () => {
       try {
         setLoading(true);
         setError("");
-        const { data } = await axios.get(CUSTOMERS_API);
-        setCustomers(Array.isArray(data) ? data : data?.data || []);
+
+        const params = {
+          search: debouncedQ || "",
+          page,
+          limit,
+          sort: sortParamFor(sortBy),
+        };
+
+        const { data } = await axios.get(CUSTOMERS_API, { params });
+
+        // Backend returns { data, page, limit, total, totalPages }
+        const list = Array.isArray(data) ? data : (data?.data || []);
+        setCustomers(list);
+        setTotal(data?.total ?? list.length);
+        setTotalPages(data?.totalPages ?? 1);
+
       } catch (err) {
         if (!axios.isCancel(err)) setError("Failed to load customers.");
       } finally {
         setLoading(false);
       }
     })();
-  }, []);
+  }, [debouncedQ, sortBy, page, limit, advResults]);
 
-  // Fetch address counts for all loaded customers (regular list)
+  // Fetch address counts for currently visible customers (normal list OR adv list)
   useEffect(() => {
-    if (!customers.length) return;
+    const visible = advResults ? (advResults.data || []).map(x => x.customer) : customers;
+    if (!visible.length) return;
 
     (async () => {
       try {
-        const ids = customers.map(c => c._id).join(",");
+        const ids = visible.map(c => c._id).join(",");
         const { data } = await axios.get(`${ADDRESS_API}/counts`, { params: { customerIds: ids } });
         setAddrCounts(data?.counts || {});
       } catch (e) {
-        // Non-blocking
         console.warn("Failed to load address counts", e);
       }
     })();
-  }, [customers]);
+  }, [customers, advResults]);
 
-  const norm   = (s = "") => (s ?? "").toString().toLowerCase().trim();
-  const digits = (s = "") => (s ?? "").toString().replace(/\D/g, "");
-  
-  //returns Search results
-  const filtered = useMemo(() => {
-    if (!q.trim()) return customers;
-    const nq = norm(q);
-    const nqDigits = digits(q);
-    return customers.filter((c) => {
-      const fullName = `${c.firstName ?? ""} ${c.lastName ?? ""}`;
-      return (
-        norm(fullName).includes(nq) ||
-        norm(c.email ?? "").includes(nq) ||
-        (nqDigits && digits(c.phone ?? "").includes(nqDigits))
-      );
-    });
-  }, [customers, q]);
-
-  // Helper: build a unified list of items so we can sort safely
-  // In adv mode we carry matched addresses + count; in normal we just have customer.
-  const baseItems = useMemo(() => {
-    if (advResults) {
-      return (advResults.data || []).map((x) => ({
-        customer: x.customer,
-        matched: x.matchedAddresses || [],
-        totalAddressCount: x.totalAddressCount ?? 0,
-      }));
-    }
-    return filtered.map((c) => ({ customer: c }));
-  }, [advResults, filtered]);
-
-  // Helpers for sorting
-  const fullName = (c) => `${c.firstName ?? ""} ${c.lastName ?? ""}`.trim().toLowerCase();
-
-  // If createdAt missing, derive from ObjectId (first 8 hex chars = seconds since epoch)
-  const createdMs = (c) => {
-    if (c?.createdAt) {
-      const t = Date.parse(c.createdAt);
-      if (!Number.isNaN(t)) return t;
-    }
-    try {
-      if (typeof c?._id === "string" && c._id.length >= 8) {
-        const sec = parseInt(c._id.slice(0, 8), 16);
-        if (!Number.isNaN(sec)) return sec * 1000;
-      }
-    } catch (_) {}
-    return 0;
-  };
-
-  const sortedItems = useMemo(() => {
-    const arr = [...baseItems];
-    arr.sort((a, b) => {
-      const ca = a.customer;
-      const cb = b.customer;
-      switch (sortBy) {
-        case SORTS.NAME_ASC:
-          return fullName(ca).localeCompare(fullName(cb));
-        case SORTS.NAME_DESC:
-          return fullName(cb).localeCompare(fullName(ca));
-        case SORTS.CREATED_DESC: // newest first
-          return createdMs(cb) - createdMs(ca);
-        case SORTS.CREATED_ASC:  // oldest first
-          return createdMs(ca) - createdMs(cb);
-        default:
-          return 0;
-      }
-    });
-    return arr;
-  }, [baseItems, sortBy]);
-
+  // Advanced Search (unchanged)
   const runAdvancedSearch = async ({ city, state, pincode, page = 1 }) => {
     try {
       setAdvLoading(true);
@@ -152,19 +134,47 @@ export default function Dashboard() {
     }
   };
 
-  const goPage = (delta) => {
+  // Pager for advanced mode
+  const goPageAdv = (delta) => {
     if (!advResults) return;
     const next = Math.min(Math.max(1, advResults.page + delta), advResults.totalPages);
     if (next === advResults.page) return;
     runAdvancedSearch({ ...advQuery, page: next });
   };
 
+  // Pager for normal list
+  const goPage = (delta) => {
+    if (advResults) return; // guard
+    const next = Math.min(Math.max(1, page + delta), totalPages);
+    if (next === page) return;
+    setPage(next);
+  };
+
   const clearAdvanced = () => {
     setAdvResults(null);
     setAdvError("");
+    setPage(1); // reset normal pager when leaving adv mode
   };
 
-  const clear = () => setQ("");
+  const clear = () => {
+    setQ("");
+    setPage(1); // go back to first page when clearing/typing search
+  };
+
+  // — Display helpers —
+  const baseItems = useMemo(() => {
+    if (advResults) {
+      return (advResults.data || []).map((x) => ({
+        customer: x.customer,
+        matched: x.matchedAddresses || [],
+        totalAddressCount: x.totalAddressCount ?? 0,
+      }));
+    }
+    // for normal list, items are already server-filtered/paginated/sorted
+    return customers.map((c) => ({ customer: c }));
+  }, [advResults, customers]);
+
+  const sortedItems = baseItems; // already sorted by server for normal list; keep as-is
 
   return (
     <div className="dashboard-container">
@@ -173,7 +183,7 @@ export default function Dashboard() {
         <div className="dashboard-header">
           <h1>Customers</h1>
           <div className="search-add">
-            <SearchBar value={q} onChange={setQ} onClear={clear} />
+            <SearchBar value={q} onChange={(v) => { setQ(v); setPage(1); }} onClear={clear} />
 
             {/* Sort control */}
             <div className="sort-wrap">
@@ -182,7 +192,7 @@ export default function Dashboard() {
                 id="sortBy"
                 className="sort-select"
                 value={sortBy}
-                onChange={(e) => setSortBy(e.target.value)}
+                onChange={(e) => { setSortBy(e.target.value); setPage(1); }}
               >
                 <option value={SORTS.NAME_ASC}>Name (A → Z)</option>
                 <option value={SORTS.NAME_DESC}>Name (Z → A)</option>
@@ -211,18 +221,29 @@ export default function Dashboard() {
                 </>
               ) : (
                 <>
-                  Showing <b>{sortedItems.length}</b> of <b>{customers.length}</b> customers
-                  {q && <> for “<i>{q}</i>”</>}
+                  Showing page <b>{page}</b> of <b>{totalPages}</b> — {sortedItems.length} on this page
+                  {debouncedQ && <> for “<i>{debouncedQ}</i>”</>}
                 </>
               )}
             </div>
 
-            {advResults && advResults.totalPages > 1 && (
-              <div className="pagination">
-                <button onClick={() => goPage(-1)} disabled={advResults.page <= 1 || advLoading}>Prev</button>
-                <span>Page {advResults.page} / {advResults.totalPages}</span>
-                <button onClick={() => goPage(1)} disabled={advResults.page >= advResults.totalPages || advLoading}>Next</button>
-              </div>
+            {/* Pagination controls */}
+            {advResults ? (
+              advResults.totalPages > 1 && (
+                <div className="pagination">
+                  <button onClick={() => goPageAdv(-1)} disabled={advResults.page <= 1 || advLoading}>Prev</button>
+                  <span>Page {advResults.page} / {advResults.totalPages}</span>
+                  <button onClick={() => goPageAdv(1)} disabled={advResults.page >= advResults.totalPages || advLoading}>Next</button>
+                </div>
+              )
+            ) : (
+              totalPages > 1 && (
+                <div className="pagination">
+                  <button onClick={() => goPage(-1)} disabled={page <= 1 || loading}>Prev</button>
+                  <span>Page {page} / {totalPages}</span>
+                  <button onClick={() => goPage(1)} disabled={page >= totalPages || loading}>Next</button>
+                </div>
+              )
             )}
           </div>
         )}
@@ -240,16 +261,13 @@ export default function Dashboard() {
         {error && <div className="error-text">{error}</div>}
 
         {/* Empty states */}
-        {!loading && !error && customers.length === 0 && !advResults && <div className="info-text">No customers found.</div>}
-        {!loading && !error && !advResults && customers.length > 0 && sortedItems.length === 0 && <div className="info-text">No matches for “{q}”.</div>}
+        {!loading && !error && !advResults && total === 0 && <div className="info-text">No customers found.</div>}
         {!loading && !error && advResults && advResults.total === 0 && <div className="info-text">No customers matched the address filters.</div>}
 
         {/* Customers grid */}
         <div className="grid-cards">
           {sortedItems.map((item) => {
             const c = item.customer;
-
-            // Count logic: use adv count if present, else fall back to addrCounts
             const totalAddressCount =
               typeof item.totalAddressCount === "number"
                 ? item.totalAddressCount
